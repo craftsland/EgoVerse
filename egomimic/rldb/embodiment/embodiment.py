@@ -31,6 +31,11 @@ class EMBODIMENT(Enum):
     SCALE_BIMANUAL = 12
     SCALE_RIGHT_ARM = 13
     SCALE_LEFT_ARM = 14
+    # Universal human embodiment (mecka/aria unified) — added for the refactor
+    # where processed zarr metadata labels the embodiment "human_bimanual".
+    HUMAN_BIMANUAL = 15
+    HUMAN_RIGHT_ARM = 16
+    HUMAN_LEFT_ARM = 17
 
 
 EMBODIMENT_ID_TO_KEY = {member.value: member.name for member in EMBODIMENT}

@@ -29,11 +29,26 @@ class Human(Embodiment):
     # MANO 21-keypoint topology: 0=wrist, 1-4 thumb, 5-8 index, 9-12 middle, 13-16 ring, 17-20 pinky.
     # Subclasses with non-MANO conventions (e.g. Aria) override these.
     FINGER_EDGES = [
-        (0, 1), (1, 2), (2, 3), (3, 4),         # thumb
-        (0, 5), (5, 6), (6, 7), (7, 8),         # index
-        (0, 9), (9, 10), (10, 11), (11, 12),    # middle
-        (0, 13), (13, 14), (14, 15), (15, 16),  # ring
-        (0, 17), (17, 18), (18, 19), (19, 20),  # pinky
+        (0, 1),
+        (1, 2),
+        (2, 3),
+        (3, 4),  # thumb
+        (0, 5),
+        (5, 6),
+        (6, 7),
+        (7, 8),  # index
+        (0, 9),
+        (9, 10),
+        (10, 11),
+        (11, 12),  # middle
+        (0, 13),
+        (13, 14),
+        (14, 15),
+        (15, 16),  # ring
+        (0, 17),
+        (17, 18),
+        (18, 19),
+        (19, 20),  # pinky
     ]
     FINGER_COLORS = {
         "thumb": (255, 100, 100),
@@ -107,13 +122,17 @@ class Human(Embodiment):
         ],
     ) -> list[Transform]:
         if mode == "cartesian":
-            return _build_human_cartesian_bimanual_transform_list(stride=cls.ACTION_STRIDE)
+            return _build_human_cartesian_bimanual_transform_list(
+                stride=cls.ACTION_STRIDE
+            )
         if mode == "cartesian_padded":
             return _build_human_cartesian_bimanual_transform_list(
                 stride=cls.ACTION_STRIDE
             ) + [PadGripperZeros(action_key="actions_cartesian")]
         if mode == "cartesian_wristframe_ypr":
-            return _build_human_cartesian_eef_frame_transform_list(stride=cls.ACTION_STRIDE)
+            return _build_human_cartesian_eef_frame_transform_list(
+                stride=cls.ACTION_STRIDE
+            )
         if mode == "keypoints_headframe_ypr":
             return _build_human_keypoints_bimanual_transform_list(
                 stride=cls.ACTION_STRIDE, is_quat=False
@@ -138,11 +157,25 @@ class Aria(Human):
     ACTION_STRIDE = 3
     # Aria's 21-keypoint layout is NOT MANO: 0-4 are fingertips, 5 is the palm root.
     FINGER_EDGES = [
-        (5, 6), (6, 7), (7, 0),               # thumb
-        (5, 8), (8, 9), (9, 10), (10, 1),     # index
-        (5, 11), (11, 12), (12, 13), (13, 2), # middle
-        (5, 14), (14, 15), (15, 16), (16, 3), # ring
-        (5, 17), (17, 18), (18, 19), (19, 4), # pinky
+        (5, 6),
+        (6, 7),
+        (7, 0),  # thumb
+        (5, 8),
+        (8, 9),
+        (9, 10),
+        (10, 1),  # index
+        (5, 11),
+        (11, 12),
+        (12, 13),
+        (13, 2),  # middle
+        (5, 14),
+        (14, 15),
+        (15, 16),
+        (16, 3),  # ring
+        (5, 17),
+        (17, 18),
+        (18, 19),
+        (19, 4),  # pinky
     ]
     FINGER_EDGE_RANGES = [
         ("thumb", 0, 3),
@@ -325,9 +358,142 @@ class Mecka(Human):
     VIZ_INTRINSICS_KEY = "mecka"
     ACTION_STRIDE = 1
 
+    # ----------------------------------------------------------------------
+    # WAM (World-Action Model) data path: load a frame CLIP + frame-aligned
+    # raw action/state chunks so the video and the action chunk cover the SAME
+    # window (everything is frame-indexed in the zarr, so equal horizons => they
+    # correspond). Block alignment for CausalWanModel: with the Wan VAE's 4x
+    # temporal compression, cam_horizon = 4*k+1 pixel frames -> k+1 latent frames
+    # -> k predicted blocks; action_horizon = npb*k actions; state_horizon = k.
+    # ----------------------------------------------------------------------
+    @classmethod
+    def get_wam_keymap(
+        cls,
+        cam_horizon: int = 17,
+        action_horizon: int = 16,
+        state_horizon: int = 4,
+        norm_mode: bool = False,
+        annotation_key=None,
+    ):
+        key_map = {
+            cls.VIZ_IMAGE_KEY: {
+                "key_type": "camera_keys",
+                "zarr_key": "images.front_1",
+                "horizon": cam_horizon,
+            },
+            "right.action_ee_pose": {
+                "key_type": "action_keys",
+                "zarr_key": "right.obs_ee_pose",
+                "horizon": action_horizon,
+            },
+            "left.action_ee_pose": {
+                "key_type": "action_keys",
+                "zarr_key": "left.obs_ee_pose",
+                "horizon": action_horizon,
+            },
+            "right.state_ee_pose": {
+                "key_type": "proprio_keys",
+                "zarr_key": "right.obs_ee_pose",
+                "horizon": state_horizon,
+            },
+            "left.state_ee_pose": {
+                "key_type": "proprio_keys",
+                "zarr_key": "left.obs_ee_pose",
+                "horizon": state_horizon,
+            },
+            # Current head pose (single, xyz+quat) — target frame for the
+            # head/camera-frame transform; deleted after the transform runs.
+            "obs_head_pose": {
+                "key_type": "proprio_keys",
+                "zarr_key": "obs_head_pose",
+            },
+        }
+        if norm_mode:  # norm stats: drop the image clip (camera) key
+            for k in [
+                k for k, v in key_map.items() if v.get("key_type") == "camera_keys"
+            ]:
+                del key_map[k]
+        return key_map
+
+    @classmethod
+    def get_wam_transform_list(cls):
+        # Raw ee-poses are stored in the WORLD frame, so we reference both the
+        # action and state chunks to the current head pose (obs_head_pose) ->
+        # head/camera frame, exactly like the VLA cartesian pipeline
+        # (_build_human_cartesian_bimanual_transform_list). This is REQUIRED:
+        # the viz projects with intrinsics only (extrinsics=None), so points
+        # must be in the camera frame to land on the hands. We use
+        # ActionChunkCoordinateFrameTransform for BOTH (state is a chunk here,
+        # not a single pose) and SKIP InterpolatePose to keep the action/state
+        # horizons frame-aligned with the video clip. Then quat -> ypr
+        # (xyzwxyz 7 -> xyzypr 6) and concat L+R left-first -> 12-dim (6/arm),
+        # the layout _split_action_pose expects.
+        return [
+            ActionChunkCoordinateFrameTransform(
+                target_world="obs_head_pose",
+                chunk_world="left.action_ee_pose",
+                transformed_key_name="left.action_ee_pose_hf",
+                mode="xyzwxyz",
+            ),
+            ActionChunkCoordinateFrameTransform(
+                target_world="obs_head_pose",
+                chunk_world="right.action_ee_pose",
+                transformed_key_name="right.action_ee_pose_hf",
+                mode="xyzwxyz",
+            ),
+            ActionChunkCoordinateFrameTransform(
+                target_world="obs_head_pose",
+                chunk_world="left.state_ee_pose",
+                transformed_key_name="left.state_ee_pose_hf",
+                mode="xyzwxyz",
+            ),
+            ActionChunkCoordinateFrameTransform(
+                target_world="obs_head_pose",
+                chunk_world="right.state_ee_pose",
+                transformed_key_name="right.state_ee_pose_hf",
+                mode="xyzwxyz",
+            ),
+            XYZWXYZ_to_XYZYPR(
+                keys=[
+                    "left.action_ee_pose_hf",
+                    "right.action_ee_pose_hf",
+                    "left.state_ee_pose_hf",
+                    "right.state_ee_pose_hf",
+                ]
+            ),
+            ConcatKeys(
+                ["left.action_ee_pose_hf", "right.action_ee_pose_hf"],
+                "actions_cartesian",
+                delete_old_keys=True,
+            ),
+            ConcatKeys(
+                ["left.state_ee_pose_hf", "right.state_ee_pose_hf"],
+                "state_ee_pose",
+                delete_old_keys=True,
+            ),
+            # Drop the raw world-frame keys: ActionChunkCoordinateFrameTransform
+            # COPIES into the _hf keys (consumed by ConcatKeys above) but leaves
+            # the originals behind. _to_wam_data concatenates ALL proprio keys
+            # into the state, so stray raw left/right.state_ee_pose (7-dim each)
+            # would inflate state 12 -> 26. Delete them (+ obs_head_pose target).
+            DeleteKeys(
+                keys_to_delete=[
+                    "obs_head_pose",
+                    "left.action_ee_pose",
+                    "right.action_ee_pose",
+                    "left.state_ee_pose",
+                    "right.state_ee_pose",
+                ]
+            ),
+        ]
+
     @classmethod
     def get_keymap(
-        cls, mode: Literal["cartesian", "keypoints"], annotations: bool = False
+        cls,
+        mode: Literal["cartesian", "keypoints"],
+        annotations: bool = False,
+        norm_mode: bool = False,
+        annotation_key=None,
     ):
         if mode == "cartesian":
             key_map = {
@@ -414,6 +580,20 @@ class Mecka(Human):
                 "key_type": "annotation_keys",
                 "zarr_key": "annotations",
             }
+        if annotation_key is not None and not norm_mode:
+            key_map[annotation_key] = {
+                "key_type": "annotation_keys",
+                "zarr_key": annotation_key,
+            }
+        # norm_mode: drop image/annotation keys so norm stats cover only
+        # proprio/action keys (mirrors Embodiment.get_keymap).
+        if norm_mode:
+            for k in [
+                k
+                for k, v in key_map.items()
+                if v.get("key_type") in ("camera_keys", "annotation_keys")
+            ]:
+                del key_map[k]
         return key_map
 
 
