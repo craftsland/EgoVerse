@@ -232,6 +232,28 @@ def test_bounds_check_full_vector_for_other_keys():
     )
 
 
+def test_vendor_embodiment_names_collapse_to_human():
+    # Mirror episodes written by the vendor-split registry carry names like
+    # MECKA_BIMANUAL in their zarr metadata; locally all human demo data is
+    # one embodiment, so these must resolve to the HUMAN_* ids.
+    from egomimic.rldb.embodiment.embodiment import EMBODIMENT, get_embodiment_id
+
+    for vendor in ("mecka", "scale", "aria", "lightwheel"):
+        assert (
+            get_embodiment_id(f"{vendor}_bimanual") == EMBODIMENT.HUMAN_BIMANUAL.value
+        )
+        assert (
+            get_embodiment_id(f"{vendor}_right_arm") == EMBODIMENT.HUMAN_RIGHT_ARM.value
+        )
+        assert (
+            get_embodiment_id(f"{vendor}_left_arm") == EMBODIMENT.HUMAN_LEFT_ARM.value
+        )
+    assert get_embodiment_id("human_bimanual") == EMBODIMENT.HUMAN_BIMANUAL.value
+    assert get_embodiment_id("eva_bimanual") == EMBODIMENT.EVA_BIMANUAL.value
+    with pytest.raises(KeyError):
+        get_embodiment_id("yam_bimanual")  # robot names are never aliased
+
+
 def test_base_converter_rejects_norm_6d_encoding():
     converter = BaseActionConverter()
     with pytest.raises(NotImplementedError, match="normalized-rot6d"):
