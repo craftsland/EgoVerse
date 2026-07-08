@@ -52,6 +52,10 @@ if [[ -n "$DEBUG_EPS" ]]; then
 fi
 if [[ -n "$NORM_PATH" ]]; then
   ARGS+=("norm_stats.precomputed_norm_path=$NORM_PATH")
+else
+  # inline stats on a tiny fraction: the smoke only needs plausible
+  # normalizers, not accurate ones — avoids the startup stats cost.
+  ARGS+=("norm_stats.sample_frac=0.02")
 fi
 
 echo "[smoke] python -u egomimic/trainHydra.py ${ARGS[*]}"

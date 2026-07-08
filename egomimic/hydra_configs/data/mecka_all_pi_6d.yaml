@@ -38,6 +38,14 @@ train_datasets:
         _target_: egomimic.rldb.embodiment.human.Human.get_transform_list
         mode: cartesian_wristframe_6d
         stride: 1
+        # processed_v3 mecka zarrs predate the mecka_to_zarr rot_left fix:
+        # the LEFT wrist frame was double-mirrored onto the right hand's
+        # spatial convention. Rz(180°)-corrects the raw left pose keys before
+        # any frame math (exactly equivalent to reconverting).
+        fix_mecka_left_wrist: true
+        # 18 -> 20-dim proprio (zero grip slots at 9/19): State: prompt bins
+        # align positionally with the robot 20-dim layout.
+        pad_proprio_gripper: true
     filters:
       _target_: egomimic.rldb.filters.DatasetFilter
       filter_lambdas:
