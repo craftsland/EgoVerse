@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 from sqlalchemy import text
@@ -89,6 +90,8 @@ def main() -> int:
     ap.add_argument("--staging-table", default=None,
                     help="Fully-qualified staging table (default app.staging_<folder>).")
     ap.add_argument("--limit", type=int, default=None, help="Stop after N zarrs (testing).")
+    ap.add_argument("--workers", type=int, default=48,
+                    help="Parallel threads for reading zarr metadata (default 48).")
     args = ap.parse_args()
 
     folder = args.folder.strip("/")
@@ -100,20 +103,21 @@ def main() -> int:
     s3 = get_boto3_s3_client()
     engine = create_default_engine()
 
-    rows, seen = [], set()
-    dupes = []
-    for i, zp in enumerate(find_zarr_prefixes(s3, base)):
-        if args.limit is not None and i >= args.limit:
-            break
+    # 1) list all episode prefixes (paginated listing is cheap: 1000/call).
+    prefixes = list(find_zarr_prefixes(s3, base))
+    if args.limit is not None:
+        prefixes = prefixes[: args.limit]
+    print(f"Found {len(prefixes)} .zarr prefixes; reading metadata "
+          f"({args.workers} threads)...", flush=True)
+
+    # 2) read each zarr's metadata in parallel — the per-episode get_object is
+    #    network-bound, so threading it is the difference between minutes and
+    #    seconds. boto3 clients are thread-safe.
+    def build_row(zp):
         episode_hash = zp.rstrip("/").split("/")[-1][: -len(".zarr")]
-        if episode_hash in seen:
-            dupes.append(episode_hash)
-            continue
-        seen.add(episode_hash)
         a = read_attrs(s3, zp)
         feats = a.get("features")
-        has_ann = isinstance(feats, dict) and "annotations" in feats
-        rows.append({
+        return {
             "episode_hash": episode_hash,
             "embodiment": a.get("embodiment"),
             "task": a.get("task_name"),
@@ -121,13 +125,23 @@ def main() -> int:
             "num_frames": a.get("total_frames"),
             "zarr_processed_path": f"s3://{BUCKET}/{zp.rstrip('/')}",
             "fps": a.get("fps"),
-            "has_annotations": has_ann,
+            "has_annotations": isinstance(feats, dict) and "annotations" in feats,
             "source_folder": folder,
             "created_at": created_at_from_hash(episode_hash),
             "raw_attrs": json.dumps(a),
-        })
-        if (i + 1) % 100 == 0:
-            print(f"  scanned {i + 1} zarrs...", flush=True)
+        }
+
+    rows, seen, dupes, done = [], set(), [], 0
+    with ThreadPoolExecutor(max_workers=args.workers) as ex:
+        for row in ex.map(build_row, prefixes):
+            done += 1
+            if row["episode_hash"] in seen:
+                dupes.append(row["episode_hash"])
+                continue
+            seen.add(row["episode_hash"])
+            rows.append(row)
+            if done % 500 == 0:
+                print(f"  read {done}/{len(prefixes)}...", flush=True)
 
     print(f"Scanned {len(rows)} unique zarr episodes under s3://{BUCKET}/{base}")
     if dupes:
